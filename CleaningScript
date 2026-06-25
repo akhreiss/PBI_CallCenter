@@ -1,0 +1,56 @@
+let
+    Source = File.Contents(
+        "ucm_cdr_data.txt"
+    ),
+    RawText = Text.FromBinary(Source),
+
+    NonEmptyLines = List.Select(
+        Lines.FromText(RawText),
+        each Text.Trim(_) <> ""
+    ),
+    CleanText = Text.Combine(NonEmptyLines, "#(lf)"),
+
+    Normalized = Text.Replace(CleanText, "', '", "','"),
+
+    AsCSV = Text.Replace(Normalized, "'", """"),
+
+    Parsed = Csv.Document(
+        Text.ToBinary(AsCSV, TextEncoding.Utf8),
+        [Delimiter = ",", QuoteStyle = QuoteStyle.Csv, Encoding = 65001]
+    ),
+
+    WithHeaders = Table.PromoteHeaders(Parsed, [PromoteAllScalars = true]),
+
+    TrimmedCols = Table.TransformColumnNames(WithHeaders, each Text.Trim(_)),
+
+    KeepCols = List.Select(
+        Table.ColumnNames(TrimmedCols),
+        each Text.Trim(_) <> ""
+    ),
+    CleanTable = Table.SelectColumns(TrimmedCols, KeepCols),
+
+    NullsFixed = Table.ReplaceValue(
+        CleanTable, "(null)", null,
+        Replacer.ReplaceValue,
+        Table.ColumnNames(CleanTable)
+    ),
+
+    QueueLegs = Table.SelectRows(NullsFixed, each
+        [Context] = "ext-queues" or [Application] = "Queue"
+    ),
+
+    Typed = Table.TransformColumnTypes(QueueLegs, {
+        {"StartTime",       type datetime},
+        {"AnswerTime",      type datetime},
+        {"EndTime",         type datetime},
+        {"Duration",        Int64.Type},
+        {"BillableSeconds", Int64.Type}
+    }),
+    #"Removed Columns" = Table.RemoveColumns(Typed,{"AccountCode", "PeerAccount", "CallerIDNum2", "OriginalCallerID", "LastApplication", "DestinationContext", "UserField", "CallType"}),
+    #"Filtered Rows" = Table.SelectRows(#"Removed Columns", each ([CallDirection] = "Inbound")),
+    #"Removed Columns1" = Table.RemoveColumns(#"Filtered Rows",{"AMAFlags", "ApplicationData"}),
+    #"Filtered Rows1" = Table.SelectRows(#"Removed Columns1", each ([Application] = "Queue")),
+    #"Removed Columns2" = Table.RemoveColumns(#"Filtered Rows1",{"Context", "Application", "CallDirection", "LinkedID", "Channel"}),
+    #"Inserted Hour" = Table.AddColumn(#"Removed Columns2", "Hour", each Time.Hour([StartTime]), Int64.Type)
+in
+    #"Inserted Hour"
